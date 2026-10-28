@@ -1,0 +1,35 @@
+{
+  "protocol": {
+    "evaluation": "training_sample_diagnostic_not_held_out",
+    "all_target_edges_removed_from_evidence": true,
+    "ontology_saw_targets": true,
+    "embedding_training_may_include_targets": true,
+    "filter_splits": [
+      "train",
+      "valid",
+      "test"
+    ],
+    "ranking": "LLM candidates first; remaining entities in RotatE order",
+    "correct_definition": "unfiltered top1 equals this target entity"
+  },
+  "overall": {
+    "count": 200,
+    "raw": {
+      "MR": 22.605,
+      "MRR": 0.4590447330114613,
+      "Hits@1": 0.34,
+      "Hits@3": 0.51,
+      "Hits@10": 0.695
+    },
+    "filtered": {
+      "MR": 4.32,
+      "MRR": 0.7130219792799862,
+      "Hits@1": 0.615,
+      "Hits@3": 0.775,
+      "Hits@10": 0.89
+    },
+    "exact_top1_accuracy": 0.34,
+    "candidate_recall": 0.935,
+    "fallback_count": 3
+  }
+}

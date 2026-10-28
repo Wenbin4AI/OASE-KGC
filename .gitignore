@@ -9,3 +9,9 @@ import/
 scripts/
 script/
 output/
+
+# Preserve the published source run; keep new local experiments out of commits.
+results/*
+!results/sample200_tail/
+*.log
+.pytest_cache/

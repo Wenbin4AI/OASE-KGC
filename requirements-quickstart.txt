@@ -1,0 +1,2 @@
+# Portable evidence replay: CPU only; no training stack or tokenizer required.
+numpy>=1.24,<3

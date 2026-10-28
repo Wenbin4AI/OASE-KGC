@@ -1,0 +1,46 @@
+{
+  "format": "oase-evidence-v1",
+  "query_count": 200,
+  "dataset": "FB15k-237",
+  "source_fingerprint": "10f6df9e07ede1378eed93024e713d23004fbaae5ba4e323c4b0eca793a53158",
+  "protocol": {
+    "evaluation": "training_sample_diagnostic_not_held_out",
+    "all_target_edges_removed_from_evidence": true,
+    "ontology_saw_targets": true,
+    "embedding_training_may_include_targets": true,
+    "filter_splits": [
+      "train",
+      "valid",
+      "test"
+    ],
+    "ranking": "LLM candidates first; remaining entities in RotatE order",
+    "correct_definition": "unfiltered top1 equals this target entity"
+  },
+  "source_hashes": {
+    "entity.json": "277fdb7a4d822618261a0f8715dab7da9bccda3bdcdc278d0b446127adfd2fe4",
+    "relation.json": "b1a44427c7951a3f5edbee368e1baee37f48d17a6264b155e9c0b54e0da11ad2",
+    "train2id.txt": "5f44223a02b39b8e398e77a787feb4f06e9ffccf1ae87047bbf38fcc8cc08bd2",
+    "valid2id.txt": "7d21e778de4369d5348f5cff23a08dc847ab5fce4b5f07c80113297d2dc60a86",
+    "test2id.txt": "6027e649c1716ac9c1ef2f24672a416aa277aff3e14850ef915ac5a21df70417"
+  },
+  "entity_count": 14541,
+  "reference_model": "gpt-5.6-sol",
+  "source_settings": {
+    "top_k": 50,
+    "endpoint_limit": null,
+    "token_budget": 3000,
+    "encoding": null,
+    "ontology_hash": "2ca1a5e1a816ecc44e1a55480af0053157ffea078541ebd52f37d5b036d1ed69",
+    "embedding_hashes": {
+      "entity_embedding.npy": "2ee46bd41bc46b4daabc79116b4d5edf1cae04da42048b86d733a34651f13578",
+      "relation_embedding.npy": "31fa8ae88a9f171ae79b373a2890c103900c9580f6139fe9b3c181994fd94f15",
+      "config.json": "4669a7e3f81cfe24009820e9edc2206b7642a31b343f4489604b20c6467d2de9"
+    }
+  },
+  "files": {
+    "queries.jsonl.gz": "0da8a7f7c007ead236df413ca75f799f98d5dce1a60d279cfc48e468a464026e",
+    "labels.json": "07c4e496ebbb39986963a8615cc823b6a7eea042b03cd39e66a5f34945e6e5bc",
+    "reference_predictions.jsonl.gz": "18ec622e76944997128e5d32753ff91a602a22df7a4eae601049f7c8ed15e624",
+    "reference_metrics.json": "38010029e392a35d80df85823f15d3c66548644003357604d52fe4f9f5b8e50c"
+  }
+}
