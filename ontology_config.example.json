@@ -1,0 +1,13 @@
+{
+  "base_url": "https://YOUR-LLM-HOST/v1",
+  "model": "YOUR-MODEL-NAME",
+  "api_key_env": "LLM_API_KEY",
+  "timeout": 120,
+  "retries": 3,
+  "max_tokens": 4096,
+  "batch_size": 12,
+  "context_per_entity": 12,
+  "min_confidence": 0.7,
+  "json_mode": false,
+  "type_aliases": {}
+}

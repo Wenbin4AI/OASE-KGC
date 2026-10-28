@@ -32,6 +32,18 @@ Then it will be displayed automatically:
 
 ## Usage
 
+### Ontology construction
+
+Training-KG ontology extraction now supports random 200-triple and full-graph modes,
+LLM API configuration, validated caching, class axioms, and domain/range updates.
+See [the Chinese workflow and usage guide](ONTOLOGY_GUIDE.md).
+
+```bash
+python extract_ontology.py --mode sample --dry-run
+python extract_ontology.py --config ontology_config.local.json --mode sample
+python extract_ontology.py --config ontology_config.local.json --mode all
+```
+
 ### 1. Clone the repository
 
 ```bash

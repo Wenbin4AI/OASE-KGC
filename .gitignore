@@ -5,6 +5,7 @@ __pycache__/
 results/
 .env
 .venv
+ontology_config.local.json
 import/
 scripts/
 script/
