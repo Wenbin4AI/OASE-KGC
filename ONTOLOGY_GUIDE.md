@@ -1,171 +1,177 @@
-# OASE-KGC 本体抽取与更新流程
+# 根据抽取本体生成 OASE-KGC 证据
 
-入口：`extract_ontology.py`。Python 3.10 及以上；只使用标准库和项目已有的 `src/kg_loader.py`，无需安装整个训练环境，也不需要 GPU。
+入口：`evidence_pipeline.py`。直接读取 `extract_ontology.py` 生成的 **ontology.json**，无需格式转换。不要传入 cache.sqlite3 或单独的 entity_types.json。
 
-## 1. 与论文的对应关系
+## 1. 流程与论文对应
 
-依据用户提供的 `AOSE_KGC_WWW2027 (5).pdf`：第 3 节定义实体多类型、子类、互斥及关系 domain/range；第 4.2 节规定多项 schema 要求按合取解释，缺失信息归为 unknown；第 5.1 节要求仅由训练 KG 构建并缓存本体；附录 A.1 强调不能仅凭待评估关系的要求反推出实体成员资格。
+实现依据论文第 4.1–4.3 节、附录 A.2–A.4：
 
-本文档及实现是依据这些定义新增的可运行构建流程。论文未给出完整抽取提示词，因此代码中的提示词和置信度阈值是工程设计，不代表复现论文表 1 的确切统计值。
+1. **训练图结构索引**：仅将 train2id.txt 的边加入索引。valid/test 仅提供查询。
+2. **一跳抽取（式 2）**：关系余弦相关性与 RotatE 复数表示的三元组 L2 距离可靠性加权。
+3. **多跳抽取（式 3）**：复数关系逐元素乘积表示路径关系；结合查询终点距离和长度衰减。按 beam 限制保留路径前缀，不重复访问实体。
+4. **本体校准（式 4–5）**：逐边检查自身关系的 domain/range，匹配或子类为 1，严格父类为 0.9，有共同可满足子类支持的 overlap 为 0.65，明确互斥为 0.1，unknown 为 0.6。多个 schema 要求按乘积合取；路径权重是所有边头尾兼容度的乘积。
+5. **预算选择（式 6–7、11、14）**：以证据质量和关系/实体/边覆盖组成目标，按单位成本边际收益贪心选择，再与最佳可行单条证据比较。覆盖采用最高质量支持，保留有增益的部分重叠路径。
+6. **候选实体（附录 A.3）**：RotatE top-K 加校准后路径池中的高分终点，去重；不插入真实答案，不过滤已知答案。候选构建不改变证据池或选择目标。
+7. **LLM 输入**：保存查询、证据、候选列表和要求返回候选索引排序的 `llm_messages`。本程序不调用 LLM，不需要 API 密钥。
 
-流程为：
+FB15k-237 默认 L=3、W=30、一跳最多150、路径最多100；WN18RR 默认 L=2、W=20、一跳最多80、路径最多50。预算默认3000，其余参数在 `defaults()` 中与论文表6对应。
 
-1. 读取实体、关系映射和指定的三元组文件，检查 ID、行格式、头部数量，并去重。
-2. 选择随机 200 条或全部三元组，保存所选 ID 三元组以复查。
-3. 以实体为单位，给 LLM 提供名称、标识符和所选图内邻域，输出多类型、理由和自评置信度。默认不把原有类型或 domain/range 作为提示，避免继承来源不明的标注。
-4. 清理大小写及空白，应用显式同义词映射；低置信度类型保留在 `proposed_types`，正式 `types` 为空，表示 unknown。
-5. 遍历所有选中三元组，统计头尾类型分布及 `(头类型, 关系, 尾类型)` 支持数。多类型实体对每种组合各贡献一次支持；同一三元组重复出现不增加支持。
-6. 逐关系向 LLM 提供完整类型计数，提议 domain/range、子类与明确互斥公理。只允许引用该关系端点已抽取的类，不凭空引入类名。
-7. 校验响应 ID、类别、置信度和格式；拒绝子类环，以及与共同子类或实体多类型赋值冲突的互斥公理。
-8. 输出完整本体、分项结果、变化记录和缓存。再次运行时重新统计当前图谱，复用内容相同的请求结果。
+工程约定：
 
-## 2. 配置接口
+- 为避免读取 gold answer，屏蔽查询起点上与查询关系相同的所有直接边。这比“只排除 held-out 目标边”更保守，可能减少证据，实验报告中应说明。
+- 合取兼容度使用各要求分数的乘积，是对论文多项同时要求的数值实现选择。
+- 观察到的实体类型赋值用于见证类的非空性；同时具备多重祖先的已见证子类，可支持 overlap。与已知互斥冲突的共同子类不会用于支持 overlap。
+- 仅新增证据构建入口；旧版 `model/extractor.py`、`run.py` 不会自动改用它。旧抽取器包含 gold-tail 奖励，不应代替此入口用于独立评估。
 
-支持 **OpenAI-compatible Chat Completions** 协议。接口必须接受 `messages`、`model`，并返回 `choices[0].message.content`。不直接支持厂商专有的 Messages/Generate 等其他协议。
+## 2. 服务器准备
 
-在项目目录的 PowerShell 中执行：
+在服务器项目根目录操作，Python 3.10+。使用导出的 numpy 权重时只需：
 
-```powershell
-Copy-Item ontology_config.example.json ontology_config.local.json
+```bash
+pip install numpy
 ```
 
-编辑 `ontology_config.local.json`：
-
-- `base_url`：服务商提供的 API 基础地址，例如 `https://你的服务地址/v1`。也可填写完整 `/chat/completions` 地址。
-- `model`：服务商提供的实际模型名称。
-- `api_key_env`：默认 `LLM_API_KEY`，表示从该环境变量读取密钥。
-- `batch_size`：每次实体抽取的实体数，默认 12。
-- `context_per_entity`：每个实体最多提供 12 条邻域边，按稳定 ID 顺序取前若干条。
-- `max_tokens`：单次输出上限，默认 4096；输出过长时调大，或减小批大小。
-- `timeout`、`retries`：请求超时秒数及额外重试次数。
-- `min_confidence`：默认 0.7。LLM 自评不是校准后的概率，需要人工抽检。
-- `json_mode`：服务支持 JSON 输出模式时可设为 `true`；默认关闭以提高兼容性，仍然严格解析、校验返回 JSON。
-- `type_aliases`：人工确认的同义类映射，例如 `{"Human":"Person","TV Series":"Television Series"}`。程序不自动把语义不明的类合并。
-
-设置密钥（替换示例值）：
-
-```powershell
-$env:LLM_API_KEY = '你的API密钥'
-```
-
-也可通过 `LLM_BASE_URL` 和 `LLM_MODEL` 环境变量覆盖配置文件中的地址与模型。不要把密钥写入配置文件；程序不从配置文件读取密钥。
-
-## 3. 两种运行模式
-
-先检查输入和预计调用量，不发送 API 请求：
-
-```powershell
-python extract_ontology.py --config ontology_config.local.json --mode sample --dry-run
-```
-
-随机抽取 **200 条不同三元组** 的本体：
-
-```powershell
-python extract_ontology.py --config ontology_config.local.json --data-path dataset/FB15k-237 --mode sample --seed 2026
-```
-
-抽取 **全部训练三元组** 的本体：
-
-```powershell
-python extract_ontology.py --config ontology_config.local.json --data-path dataset/FB15k-237 --mode all
-```
-
-WN18RR 只需要换数据目录：
-
-```powershell
-python extract_ontology.py --config ontology_config.local.json --data-path dataset/WN18RR --mode all
-```
-
-默认输出分别位于 `import/ontology/数据集名/sample/` 和 `import/ontology/数据集名/all/`，不会覆盖源数据。图不足 200 条时使用全部数据。随机种子相同且输入图相同时，选中的三元组相同；LLM 跨次生成本身不保证完全确定，成功结果通过缓存固定。
-
-随机模式只用这 200 条边构建上下文、类型和关系统计，不额外读取未选中的边作为 LLM 上下文。全量模式将所有选中边用于统计，但每个实体的 LLM 邻域仍受 `context_per_entity` 限制。
-
-全量表示覆盖所选图谱中的所有边及其端点，不包括没有任何选中边的孤立实体，也不意味着穷举所有可能的类间公理。子类/互斥提议针对各关系端点出现的类型集合，不执行全局类对的平方级搜索。
-
-## 4. 输入格式与划分
-
-当前适配项目已有格式：
+准备两个输入：
 
 ```text
-数据目录/
-  entity.json
-  relation.json
-  train2id.txt
-  valid2id.txt     # 仅显式选用 valid 时必需
-  test2id.txt      # 仅显式选用 test 时必需
+import/ontology/FB15k-237/all/ontology.json
+
+import/KGE_model/FB15k-237/
+  entity_embedding.npy
+  relation_embedding.npy
+  config.json
 ```
 
-实体文件支持现有 `value/id`、`label` 等字段，关系文件支持 `id`、`label`。三元组默认是 OpenKE 的 **head tail relation**，第一行可为总条数。若文件是 **head relation tail**，指定 `--triple-order hrt`。输出 `selected_triples.json` 始终是 **[head, relation, tail]**。
+也可把 `--embeddings` 指向 `checkpoint.pt`，但这需要安装 PyTorch 并支持 `torch.load(weights_only=True)`。权重必须是项目 `model/KGE_model.py` 的 RotatE 格式：实体为 `[N,2d]`，关系为 `[R,d]` 的相位参数。其他库权重需转换，不可直接假定相同格式。
 
-程序不猜测三元组顺序；错误 ID、格式、数量会明确报错。此版本不直接导入原始文本 ID 的 `train.txt`、CSV、RDF/Turtle；这类数据须先映射为上述整数 ID 格式。
+程序不会自动训练、生成随机权重或调用外部模型。没有权重时，可用现有训练模块显式训练。例如 FB15k-237：
 
-论文实验保持默认 `--splits train`。如果是独立业务图谱汇总，确实需要把所有划分一起使用，可以执行：
-
-```powershell
-python extract_ontology.py --config ontology_config.local.json --mode all --splits train,valid,test --output import/ontology/FB15k-237/business-all
+```bash
+python3 model/KGE_model.py --mode train \
+  --data_path dataset/FB15k-237 --dataset_name FB15k-237 \
+  --hidden_dim 200 --gamma 9 --learning_rate 0.00005 --max_steps 100000
 ```
 
-此结果不能再用于宣称“仅由训练图谱构建”的论文评估。原有实体名称、描述也应确认未嵌入测试答案；程序无法审计标注来源。只有确认旧类型来源可靠时才加 `--use-existing-types`，将其作为可被 LLM 修订的提示。
+该训练命令可能耗时较长；已有训练权重时直接复用。使用者需确认权重仅基于训练边训练，以及实体/关系 ID 与当前数据完全一致；形状校验无法证明训练来源。
 
-## 5. 结果说明
+## 3. 先抽取少量查询
 
-| 文件 | 内容 |
+你正在生成 sample 本体，完成后可先用它验证流程：
+
+```bash
+python3 evidence_pipeline.py \
+  --data-path dataset/FB15k-237 \
+  --ontology import/ontology/FB15k-237/sample/ontology.json \
+  --embeddings import/KGE_model/FB15k-237 \
+  --split test --prediction tail --limit 10 \
+  --output output/evidence/FB15k-237/sample_10.jsonl
+```
+
+注意两个范围不同：本体 sample 是由200条训练边构建；`--limit 10` 是处理10个预测查询。证据始终从整个训练图检索。本体未覆盖的实体、关系使用 unknown 分数，而不是继承原文件来源不明的类型。因此 sample 用于调试，正式实验建议使用 all 本体。
+
+## 4. Token 预算与正式运行
+
+不指定 tokenizer 时，以 UTF-8 字节数作为 byte-level BPE 的保守上界。此时预算3000不等于精确3000 tokens，通常会选出较少证据。
+
+对论文中的 o200k_base 计数：
+
+```bash
+pip install tiktoken
+
+python3 evidence_pipeline.py \
+  --data-path dataset/FB15k-237 \
+  --ontology import/ontology/FB15k-237/all/ontology.json \
+  --embeddings import/KGE_model/FB15k-237 \
+  --encoding o200k_base --token-budget 3000 \
+  --split test --prediction both \
+  --output output/evidence/FB15k-237/test_both.jsonl
+```
+
+`tiktoken` 初次加载编码可能需要下载词表。若实际使用其他 LLM，应使用与该模型对应的本地 tokenizer：
+
+```bash
+python3 evidence_pipeline.py \
+  --data-path dataset/FB15k-237 \
+  --ontology import/ontology/FB15k-237/all/ontology.json \
+  --embeddings import/KGE_model/FB15k-237 \
+  --tokenizer /你的服务器路径/tokenizer \
+  --split test --prediction tail --limit 10 \
+  --output output/evidence/FB15k-237/local_tokenizer_10.jsonl
+```
+
+本地 tokenizer 模式需要 `transformers`，不启用远程代码。`--tokenizer` 和 `--encoding` 二选一。
+
+预算只约束证据；问题、候选、系统提示和返回结果另外占用上下文。可加 `--context-window 32768 --response-reserve 1024` 做整段输入的估算检查。程序计数消息正文并加32开销，厂商聊天模板可能不同，因此发送前仍需按照实际 API 模板确认总长度；这不是服务端精确 token 计费结果。
+
+`--prediction both` 对每行查询先输出 tail，再输出 head。头预测将训练边反向、关系向量取复共轭，并交换 domain/range；文本明确标记 inverse of。`--limit` 计算输出查询条数，因此 both 模式 limit=10 通常是5行测试三元组的双向预测。
+
+## 5. 结果及中间进度
+
+每处理完一个查询，就把完整 JSON 写入输出 JSONL 并刷新文件，不必等全量结束。另开终端可查看第一条：
+
+```bash
+head -n 1 output/evidence/FB15k-237/sample_10.jsonl | python3 -m json.tool
+```
+
+主要字段：
+
+| 字段 | 含义 |
 |---|---|
-| `ontology.json` | 权威完整快照：实体、类型、关系 schema、类型级边、公理、配置及统计 |
-| `entity_types.json` | 实体 ID → `types`、`proposed_types`、理由、置信度 |
-| `relation_schema.json` | 关系 ID → domain/range、原始声明、端点类型计数、覆盖数、示例边、LLM 提议 |
-| `class_axioms.json` | 通过一致性检查的公理及被拒绝的公理与原因 |
-| `selected_triples.json` | 本次实际使用的去重三元组 |
-| `changes.json` | 相对上一快照新增、删除、变更的实体/关系，含变更前后内容 |
-| `history/*.json` | 每次成功更新的清单和变化记录 |
-| `cache.sqlite3` | 验证成功的请求响应，供中断后续跑 |
-| `dry_run.json` | 仅预检查时产生的范围及预计请求量 |
+| `query_index` | 原输入文件中0起始的查询行索引（不含数量头部） |
+| `prediction` | tail 或 head |
+| `query_entity_id` | 已知端实体ID，头预测时为原尾实体 |
+| `evidence_text` | 可直接放进 prompt 的证据文本 |
+| `selected_evidence` | 选中证据、三元组ID、结构分数、本体校准、成本 |
+| `evidence_pool` | 预算选择前的全部候选证据，用于分析/消融 |
+| `candidates` | 候选索引、实体ID、名称、类型、候选来源 |
+| `llm_messages` | 可直接传入兼容聊天接口的 messages 数组 |
+| `evidence_cost` | 最终拼接证据的实际计数成本 |
+| `provenance` | train 来源、输入哈希、本体模式、是否使用gold等 |
 
-`ontology.json` 中 `type_relations` 的示意结构（非实际抽取结果）：
+示意证据（不是运行结果）：
+
+```text
+- "Alice" --["worksAt"]--> "University A"
+- "Alice" --["bornIn"]--> "City A" --["locatedIn"]--> "Country A"
+```
+
+程序保留原始划分行顺序及重复查询，以便与测试答案对齐；`llm_messages` 中不包含 gold answer 或 gold 标识。头预测的证据三元组 ID 按反向解释，配合 `prediction=head` 和文本中的 inverse of 使用。
+
+输出文件已存在时程序拒绝覆盖，避免误删已有实验。中断时已刷新的行保留，本版本未实现自动断点续跑；重跑使用新的 `--output` 文件名。完整 evidence_pool 会增加文件体积。
+
+## 6. 把结果交给 LLM
+
+读取一条结果后直接使用其 messages：
+
+```python
+import json
+
+with open("output/evidence/FB15k-237/sample_10.jsonl", encoding="utf-8") as f:
+    record = json.loads(next(f))
+
+messages = record["llm_messages"]
+# 将 messages 传给你的 LLM 调用函数。
+# 期望返回：{"ranking": [3, 0, 2, 1, ...]}
+# 将候选索引映射回实体 ID：
+# candidate_entity_ids = [record["candidates"][i]["entity_id"] for i in ranking]
+```
+
+评估时校验每个候选索引恰好出现一次，真实答案从原测试集按 query_index 获取，并与 prediction 对应。不要将答案加入 prompt，也不要强制放进候选列表。
+
+本程序负责证据及候选构建，不负责 API 调用或评估指标。论文的 filtered full-entity MRR/Hits 还需要：将候选排序放在完整 RotatE 排序之前，其余实体保持原序；只在指标计算阶段过滤其他已知答案；答案未进入候选集的查询也必须纳入。仅对候选内答案算指标会高估效果。
+
+## 7. 自定义查询
+
+尾预测 JSONL：
 
 ```json
-{"head_type":"Person","relation_id":0,"relation":"livesIn","tail_type":"City","support":23}
+{"query_head_id":0,"query_relation_id":1}
 ```
 
-需要区分两类信息：
+头预测则提供 `query_tail_id`，both 时提供两端作为双向查询的已知端。使用 `--queries queries.jsonl` 替代测试划分作为查询来源；程序不会使用另一端给证据评分。
 
-- `domain_counts` / `range_counts`：经验类型分布，统计的是有该端点类型的三元组数，不是独立实体数，也不是必需条件。
-- `domain` / `range`：达到阈值的 LLM schema 提议，列表内按 **AND** 解释。例如 `domain: ["Person", "Researcher"]` 表示同时满足二者；如果不能支持统一要求，返回空列表表示 unknown。不会自动将所有观察类型合取起来。
+## 8. 验证范围
 
-`source_domain` / `source_range` 保留输入文件原有声明以便对照，它们不会直接覆盖新抽取结果。互斥只在 LLM 明确提出且未发现已知冲突时记录；缺失公理不代表互斥。检查通过也不等于 OWL 逻辑完备性证明。当前输出是可审计 JSON，不是 OWL/RDF 序列化。
+测试命令：`python3 -m unittest discover -s tests -v`。
 
-## 6. 更新和断点续跑
-
-图谱新增、删除或修订后，用**相同输出目录**重跑原命令：
-
-```powershell
-python extract_ontology.py --config ontology_config.local.json --mode all
-```
-
-每次根据当前图重新统计，不把计数盲目追加到旧结果，因此重复运行不会重复计数，删除边也会减少支持数。请求内容、模型、地址、提示词等相同则命中缓存；上下文或类型分布变化时重新调用。由于实体请求按批缓存，新增实体造成分批边界变化时可能多次重算。
-
-API 失败会重试，鉴权错误等不可恢复 HTTP 错误立即退出。失败响应不会写入缓存；中断后原命令续跑即可。没有完成整个流程时，不发布新的 `ontology.json`。分项文件与总文件之间不保证跨文件事务，消费程序应以最后写入的 `ontology.json` 为准。不要同时向同一个输出目录启动两个进程。
-
-随机样本在图谱增删后可能变化；需要增量维护完整本体时使用 `all`。样本模式和全量模式默认分目录保存，不会将样本结果误加到全量统计中。
-
-## 7. 后续接入论文推理模块
-
-此脚本构建本体，不改写现有 `run.py` 的推理逻辑。通过 `json.load` 读取 `ontology.json`，按实体 ID 获取 `entities[id].types`，按关系 ID 获取 `relations[id].domain/range`，用 `axioms` 构造子类图与互斥表。
-
-原项目 `model/filter.py` 的 range 匹配不是完整的论文第 4.2 节实现，不能把多项合取 schema 直接当作“任选其一”的候选列表使用。正式接入需遵循：每个证据三元组分别检查其自身关系的头实体 domain 和尾实体 range；子类传递闭包；正向支持优先；共同可满足子类支持 overlap；未确认情况为 unknown。对 held-out 查询不能反用目标边确认实体类型。本次未修改这部分证据评分代码。
-
-可将 `manifest.statistics` 的类数、赋值数、子类、公理和 schema 数用于整理实验记录。schema 数按每个非空 domain/range 各计一项，与论文表 1 的口径对应，但不能把 unknown 计为已构建约束。
-
-## 8. 验证与限制
-
-运行本地自动测试：
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-测试覆盖随机抽样、训练集隔离、输入校验、多类型统计、重复运行和删边更新、子类环/互斥冲突、响应校验、API 重试及缓存。模拟 API 测试不能验证你的服务商兼容性和真实语义质量。首次实际运行建议使用 sample 并人工检查类型、domain/range 和互斥公理后再跑 all。
-
-默认配置下，本项目数据的预检查估算（不含重试，不等于 token/费用估算）：FB15k-237 sample 为 200 边、368 实体、89 关系，约 120 次调用；all 为 272,115 边、14,505 实体、237 关系，约 1,446 次。请求串行执行。实际费用取决于接口价格与响应长度；缓存可减少重复请求。
-
-很大的单关系类型词表可能超出模型上下文窗口。此版本不截断这些分布，因此遇到此情况应先使用 `type_aliases` 规范类型粒度，或选择更大上下文的模型。语义同义词归并及全局类层级补全仍需审阅。
+新增测试覆盖当前本体格式、unknown、正向支持优先、合取、overlap、一跳/多跳公式、逐边校准、反向关系、预算、最佳单证据比较、候选排序，以及完整命令行输出和来源不匹配拒绝。已使用小型合成权重完成端到端验证；本地未发现可用的训练权重及服务器抽取后的实际本体，因此尚未进行真实数据的 LLM 指标评测。

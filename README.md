@@ -44,6 +44,13 @@ python extract_ontology.py --config ontology_config.local.json --mode sample
 python extract_ontology.py --config ontology_config.local.json --mode all
 ```
 
+### Paper-aligned evidence construction
+
+Use `evidence_pipeline.py` to consume the generated ontology, trained RotatE
+embeddings, and training graph. It exports budgeted evidence, candidates, and
+LLM-ready messages for head/tail prediction without gold-answer scoring.
+See [the server commands and evidence workflow](EVIDENCE_GUIDE.md).
+
 ### 1. Clone the repository
 
 ```bash
